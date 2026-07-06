@@ -8,15 +8,20 @@ import WatchKit
 /// trace what the app is doing. It also watches the audio ROUTE, so you can see
 /// when the ESP32 (Bluetooth A2DP) becomes the active output vs. the watch.
 @MainActor
-final class PlayerModel: ObservableObject {
+final class PlayerModel: NSObject, ObservableObject {
 
     private let trackFileNames = ["song1", "song2", "song3", "song4"]
     private let trackExtension = "mp3"
-    let trackTitles = ["Track One", "Track Two", "Track Three", "Track Four"]
+    let trackTitles = ["Track One", "A Very Long Song Name That Should Scroll", "Track Three", "Track Four"]
+    let trackArtists = ["Unknown Artist", "Unknown Artist", "Unknown Artist", "Unknown Artist"]
+    /// Asset-catalog image names for cover art. Add matching images to
+    /// Assets.xcassets; missing ones fall back to a placeholder icon.
+    let trackArtworks = ["cover1", "cover2", "cover3", "cover4"]
 
     @Published private(set) var currentIndex = 0
     @Published private(set) var isPlaying = false
     @Published private(set) var volume: Float = 0.6
+    @Published private(set) var currentTime: TimeInterval = 0
 
     /// Human-readable name of the current audio output (shown on screen).
     /// e.g. "Interactive Speaker" (ESP32) or "Speaker" (the watch itself).
@@ -26,10 +31,21 @@ final class PlayerModel: ObservableObject {
     /// Last thing that happened, shown on the watch for quick glance-debugging.
     @Published private(set) var lastEvent = "ready"
 
+    /// Most recent gesture that drove playback (not plain button taps) — shown
+    /// on the Now Playing screen and in the Gestures guide.
+    struct GestureEvent {
+        let icon: String
+        let label: String
+        let action: String
+    }
+    @Published private(set) var lastGesture = GestureEvent(icon: "hand.pinch", label: "Double Tap", action: "Next track")
+
     private var audioPlayer: AVAudioPlayer?
     private let volumeStep: Float = 0.05
+    private var playbackTimer: Timer?
 
-    init() {
+    override init() {
+        super.init()
         log("init")
         configureAudioSession()
         observeRouteChanges()
@@ -99,10 +115,12 @@ final class PlayerModel: ObservableObject {
         }
         do {
             let newPlayer = try AVAudioPlayer(contentsOf: url)
+            newPlayer.delegate = self
             newPlayer.volume = volume
             newPlayer.prepareToPlay()
             audioPlayer = newPlayer
             currentIndex = index
+            currentTime = 0
             log("loaded '\(name)' duration=\(String(format: "%.1f", newPlayer.duration))s")
             if autoplay { play() } else { isPlaying = false }
         } catch {
@@ -118,6 +136,7 @@ final class PlayerModel: ObservableObject {
         haptic(.start)
         setEvent(ok ? "▶️ playing '\(currentTitle)' -> \(outputRouteName)"
                     : "❌ play() returned false")
+        startPlaybackTimer()
     }
 
     func pause() {
@@ -125,6 +144,43 @@ final class PlayerModel: ObservableObject {
         isPlaying = false
         haptic(.stop)
         setEvent("⏸️ paused")
+        playbackTimer?.invalidate()
+    }
+
+    private func startPlaybackTimer() {
+        playbackTimer?.invalidate()
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in self.currentTime = self.audioPlayer?.currentTime ?? 0 }
+        }
+    }
+
+    /// Seek within the current track (tap on the progress bar). `fraction` is
+    /// 0…1 of the track duration.
+    func seek(toFraction fraction: Double) {
+        guard let audioPlayer else { return }
+        let clamped = min(max(fraction, 0), 1)
+        let target = clamped * audioPlayer.duration
+        audioPlayer.currentTime = target
+        currentTime = target
+        setEvent("⏩ seek \(Int(clamped * 100))%")
+    }
+
+    /// Jump to a specific playlist entry (tap in the Playlist screen). Tapping
+    /// the currently-playing track toggles play/pause instead of reloading it.
+    func selectTrack(_ index: Int) {
+        if index == currentIndex {
+            togglePlayPause()
+        } else {
+            load(index: index, autoplay: true)
+        }
+    }
+
+    /// Records the gesture that just drove playback, for the Now Playing
+    /// screen's hint card and the Gestures guide. Only called from gesture
+    /// sites (Double Tap / flick / shake / Crown), not plain button taps.
+    func noteGesture(icon: String, label: String, action: String) {
+        lastGesture = GestureEvent(icon: icon, label: label, action: action)
     }
 
     func togglePlayPause() {
@@ -159,5 +215,23 @@ final class PlayerModel: ObservableObject {
 
     var currentTitle: String {
         trackTitles.indices.contains(currentIndex) ? trackTitles[currentIndex] : "—"
+    }
+
+    var currentArtist: String {
+        trackArtists.indices.contains(currentIndex) ? trackArtists[currentIndex] : "—"
+    }
+
+    var duration: TimeInterval {
+        audioPlayer?.duration ?? 0
+    }
+}
+
+// MARK: - AVAudioPlayerDelegate (auto-advance when a track ends)
+extension PlayerModel: AVAudioPlayerDelegate {
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in
+            guard flag else { return }
+            self.next()
+        }
     }
 }

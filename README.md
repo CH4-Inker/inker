@@ -2,7 +2,7 @@
 
 A **standalone Apple Watch app** that plays 4 local songs and streams them to an
 **ESP32 Bluetooth speaker**, controlled by on-screen buttons, motion gestures,
-and the system Double Tap — all with haptic confirmation.
+the system Double Tap, and the Digital Crown — all with haptic confirmation.
 
 No iPhone at runtime, no Wi-Fi, no internet. Just the watch and the ESP32 over
 Bluetooth.
@@ -21,35 +21,48 @@ Bluetooth.
 
 ---
 
+## Screens
+Two pages, swipe left/right between them (`TabView` paging), both sharing a
+top bar (playlist button + a "Gesture ON" badge when motion gestures are
+armed). No app clock — watchOS shows its own in the status bar:
+
+- **Now Playing** — title/artist, a seekable progress bar (tap to jump within
+  the track), and a card showing the last gesture that drove playback (tap it
+  to open the **Gestures** guide).
+- **Controls** — circular Previous/Play-Pause/Next buttons, a volume bar
+  flanked by speaker icons, and the **Motion gesture** toggle.
+
+From either page, tap the top-left icon to open **My Playlist** — tap a track
+to play it, tap the currently-playing track to toggle play/pause.
+
 ## Controls
 
 ### Buttons (always available)
-Previous · Play/Pause · Next, plus Volume Down / Volume Up.
+Previous · Play/Pause · Next, plus Volume Down / Volume Up (on the Controls page).
 
 ### Motion gestures (toggle on with the "Motion gestures" switch)
 
 | Gesture | Action | Haptic |
 |---|---|---|
-| Single flick **right** | Next track | click |
-| Single flick **left** | Previous track | click |
-| Double flick **right** | Volume up | direction-up |
-| Double flick **left** | Volume down | direction-down |
+| Flick (either direction) | Previous track | click |
 | **Shake** | Play / Pause | start / stop |
 
 ### System gesture
-**Double Tap** (pinch index + thumb twice) → Play/Pause. Requires Apple Watch
+**Double Tap** (pinch index + thumb twice) → Next track. Requires Apple Watch
 **Series 9 / Ultra 2 or later**.
 
-> **Why these gestures?** The watch can only sense whole-wrist motion
-> (accelerometer + gyroscope) — there is **no finger tracking** available to
-> third-party apps, and real pinch/clench recognition is not exposed by watchOS.
-> Flicks (sharp yaw rotation) and shake (repeated linear acceleration) are the
-> reliable, distinguishable motions available. Play/Pause additionally uses the
-> one official hands-free hook Apple provides: Double Tap.
+### Digital Crown
+Rotate the Crown → Volume up/down, with the system's built-in haptic detents.
 
-**Gesture timing note:** a *single* flick fires only after a short wait
-(`doubleWindow`, ~0.45s) so it can rule out a second flick — the same tradeoff a
-mouse double-click has. This is expected, not a bug.
+> **Why this mix?** The watch can only sense whole-wrist motion
+> (accelerometer + gyroscope) — there is **no finger tracking** available to
+> third-party apps, and AssistiveTouch's cursor-based select-then-activate
+> model wasn't wanted here. A sharp wrist flick (either direction — no need
+> to distinguish, since it only drives one action) reliably triggers
+> Previous, and shake reliably triggers Play/Pause. Next uses the one
+> official hands-free hook Apple provides directly to apps: Double Tap.
+> Volume uses the Crown since it's a dedicated physical control with no
+> ambiguity or false-trigger risk at all.
 
 ---
 
@@ -71,11 +84,17 @@ mouse double-click has. This is expected, not a bug.
    - `PlayerModel.swift`
    - `MotionGestureManager.swift`
    - `ContentView.swift`
+   - `TopBar.swift`
+   - `ThinBar.swift`
+   - `NowPlayingView.swift`
+   - `ControlsView.swift`
+   - `PlaylistView.swift`
+   - `GestureGuideView.swift`
 3. **Add 4 audio files** named `song1.mp3 … song4.mp3` to the watch target
    (drag into the Project Navigator → check **Copy items if needed** and tick
    the **Watch App target** under *Add to targets*). Verify each file's
-   **Target Membership** in the File Inspector. Edit `trackTitles` in
-   `PlayerModel.swift` for display names.
+   **Target Membership** in the File Inspector. Edit `trackTitles` and
+   `trackArtists` in `PlayerModel.swift` for display names.
 4. **Info settings** (target → Info tab):
    - Add `NSMotionUsageDescription` = "Used for wrist gesture controls."
    - Background Modes → enable **Audio** (keeps playback alive with screen off).
@@ -92,23 +111,30 @@ mouse double-click has. This is expected, not a bug.
 6. **Run** to a real watch.
 
 ### Using it
-- Buttons work immediately.
-- Flip **Motion gestures** ON to arm flick/shake control (you'll feel a "start"
-  haptic and an on-screen legend appears). Turn it OFF to avoid accidental
-  triggers while walking, etc.
-- Double Tap → play/pause.
+- Buttons work immediately (Controls page).
+- Flip **Motion gesture** ON (Controls page) to arm flick/shake control
+  (you'll feel a "start" haptic, and the top bar shows a "Gesture ON" badge).
+  Turn it OFF to avoid accidental triggers while walking, etc.
+- Double Tap → next. Rotate the Digital Crown → volume.
+- Tap the last-gesture card on the Now Playing page to see the full gesture
+  list (Gestures screen).
 
 ### Tuning the gestures — top of `MotionGestureManager.swift`
 | Constant | Meaning | If gestures… |
 |---|---|---|
-| `flickThreshold` (3.5) | yaw speed to count as a flick | missed → lower; too easy → raise |
-| `doubleWindow` (0.45) | max gap for a "double" flick | doubles missed → raise; single too slow → lower |
+| `flickThreshold` (12.0) | pitch (tilt) speed to count as a flick | missed → lower; fires from normal hand movement → raise |
+| `flickReset` (4.0) | pitch speed must fall below this before another flick can fire | one rotation fires more than once → raise (closer to `flickThreshold`) |
+| `flickRefractory` (0.35) | minimum time between flicks | one flick counts twice → raise |
 | `shakeThreshold` (2.2) | peak accel for a shake | hard to shake → lower; false play/pause → raise |
 | `shakePeaksNeeded` (3) | shakes required in window | same as above |
-| `flickRefractory` (0.20) | lockout after each flick edge | one flick counts twice → raise |
 
-Watch the `🖐️ [Gesture]` console logs — they print the actual `yawRate` values
-so you can tune against real numbers instead of guessing.
+**How to tune `flickThreshold` to your actual wrist:** every time your hand
+settles after moving, the console logs a line like
+`hand movement settled, peak rotationRate.x = 4.31 rad/s (threshold=8.00)` —
+even for movements that *don't* fire. Move your hand normally a few times and
+note the peak values, then do a real fast flick and note that peak. Set
+`flickThreshold` somewhere between the two (closer to the fast-flick number)
+so casual movement never crosses it but a deliberate flick reliably does.
 
 ---
 
@@ -160,11 +186,12 @@ Key lines to watch, in order:
   `⚠️ NOT bluetooth`, the watch is playing to itself, not the ESP32.
 - `🖐️ [Gesture]` — every detected flick/shake with its measured values.
 
-### watchOS — on-screen debug panel (no tether needed)
-At the bottom of the app screen:
-- Colored dot + output name: **green = Bluetooth (ESP32)**, **orange = watch's
-  own output**.
-- The last event (e.g. "▶️ playing Track One → Interactive Speaker").
+### watchOS — on-screen debug panel
+Dropped from the redesigned UI (Now Playing / Controls / Playlist / Gestures
+screens have no room for it) — `outputRouteName`, `isBluetoothOutput`, and
+`lastEvent` are still tracked in `PlayerModel` and printed to the Xcode
+console (`🎵 [Player]` / `🎚️ route`), just no longer shown on-watch. Say the
+word if you want a debug page added back (e.g. a 3rd swipe page).
 
 ### Haptics as a debug signal
 Every gesture-triggered action buzzes the moment it's recognised. **Feel a
@@ -182,10 +209,10 @@ lets you test sensitivity by feel, without looking at the screen.
 ## Known limitations
 - **No finger tracking.** Apple Watch senses whole-wrist motion only; individual
   finger movement and true pinch/clench are not available to apps.
-- **Simulator can't test the core.** Motion and Bluetooth audio require a real
-  watch.
+- **Simulator can't test the core.** Motion, Digital Crown, and Bluetooth audio
+  require a real watch (Crown rotation does work in Simulator via the "..."
+  menu, but treat that as unverified until tested on-device).
 - **ESP32 chip matters.** A2DP needs Classic Bluetooth — original ESP32 only.
-- **Single flick has a built-in delay** (see gesture timing note).
 - **Gesture thresholds are personal** — expect to tune them to your wrist.
 
 ---
@@ -203,9 +230,15 @@ InteractiveSpeaker/
 ├── README.md
 ├── watchapp/
 │   ├── InteractiveSpeakerApp.swift   app entry point
-│   ├── PlayerModel.swift             playlist, playback, volume, route + haptics + logs
-│   ├── MotionGestureManager.swift    flick/shake detection engine
-│   └── ContentView.swift             UI: buttons, legend, debug panel
+│   ├── PlayerModel.swift             playlist, playback, volume, progress, route + haptics + logs
+│   ├── MotionGestureManager.swift    flick/shake detection engine (previous/play-pause)
+│   ├── ContentView.swift             paging container: Crown + Double Tap wiring, gesture callbacks
+│   ├── TopBar.swift                  shared header: playlist button, Gesture ON badge
+│   ├── ThinBar.swift                 thin rounded progress/volume bar (seekable variant)
+│   ├── NowPlayingView.swift          page 1: title/artist/seek bar, last-gesture card
+│   ├── ControlsView.swift            page 2: transport, volume, Motion gesture toggle
+│   ├── PlaylistView.swift            track list, tap to play/pause
+│   └── GestureGuideView.swift        static list of all gesture mappings
 └── esp32/
     └── esp32_a2dp_speaker.ino        A2DP Bluetooth speaker sink (debug build)
 ```

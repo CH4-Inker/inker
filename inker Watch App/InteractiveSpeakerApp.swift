@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - App entry point
 //
 // Target: watchOS 11+ (tested against watchOS 26).
-// Double Tap gesture requires Apple Watch Series 9 / Ultra 2 or later.
+// Double Tap gesture (-> next) requires Apple Watch Series 9 / Ultra 2 or later.
 //
 // The audio you play here is routed to the ESP32 automatically once the ESP32
 // is paired as a Bluetooth (A2DP) speaker and is the active audio output.

@@ -6,20 +6,21 @@ import Combine
 /// Motion-gesture engine (whole-wrist motion only — finger tracking isn't
 /// possible on Apple Watch). Detects:
 ///
-///   • Single flick RIGHT  -> next
-///   • Single flick LEFT   -> previous
-///   • Double flick RIGHT  -> volume up
-///   • Double flick LEFT   -> volume down
-///   • Shake               -> play / pause
+///   • Flick (either direction) -> previous
+///   • Shake                    -> play / pause
 ///
-/// A "flick" is a sharp yaw rotation (rotationRate.z). A "shake" is repeated
-/// linear acceleration reversals (userAcceleration magnitude), so the two are
-/// detected from different signals and don't fight each other.
+/// Next comes from the system Double Tap hand gesture (wired directly in
+/// ContentView via `.handGestureShortcut`), and volume comes from the
+/// Digital Crown — neither goes through this engine.
 ///
-/// Single vs. double works like a double-click: on the first flick we wait a
-/// short window to see if a second same-direction flick follows. This means a
-/// SINGLE flick fires only after `doubleWindow` elapses — an unavoidable small
-/// delay, the same tradeoff a mouse double-click has.
+/// A "flick" is a sharp pitch rotation (rotationRate.x — wrist tilting up or
+/// down); either direction fires the same action, so there's no asymmetry
+/// concern here. It uses the same armed/reset hysteresis as shake below: a
+/// single continuous hand rotation must drop back below `flickReset` before
+/// it can fire again, so casually rotating your wrist doesn't fire Previous
+/// more than once (or at all, if it doesn't cross `flickThreshold`). A
+/// "shake" is repeated linear acceleration reversals (userAcceleration
+/// magnitude), detected from a different signal so it doesn't fight the flick.
 ///
 /// Haptics fire the instant a gesture is recognised (via PlayerModel actions),
 /// so you feel confirmation on your wrist.
@@ -27,10 +28,7 @@ import Combine
 final class MotionGestureManager: NSObject, ObservableObject {
 
     // Wired to PlayerModel by ContentView.
-    var onNext: (() -> Void)?
     var onPrevious: (() -> Void)?
-    var onVolumeUp: (() -> Void)?
-    var onVolumeDown: (() -> Void)?
     var onPlayPause: (() -> Void)?
 
     @Published private(set) var isRunning = false
@@ -41,10 +39,12 @@ final class MotionGestureManager: NSObject, ObservableObject {
 
     // MARK: - Tunable thresholds (adjust on your own wrist)
 
-    // Flick (rotational / yaw)
-    private let flickThreshold: Double   = 3.5   // rad/s yaw spike to count as a flick
-    private let flickRefractory: TimeInterval = 0.20 // ignore new flick edges this long after one
-    private let doubleWindow: TimeInterval    = 0.45 // max gap between 2 flicks to be a "double"
+    // Flick (rotational / pitch — wrist tilt up/down)
+    private let flickThreshold: Double   = 12.0  // rad/s pitch spike to count as a flick — needs a genuinely fast wrist snap
+    private let flickReset: Double        = 4.0   // rad/s, must fall below this before another flick can fire (hysteresis)
+    private let flickRefractory: TimeInterval = 0.35 // minimum time between flicks, even if reset briefly
+    private let flickCalmAccel: Double    = 1.2   // g, flick only fires if linear accel is BELOW this (shake is well above) — keeps a shake from also firing a flick
+    private let flickShakeLockout: TimeInterval = 0.5 // ignore flick this long after any shake peak
 
     // Shake (linear acceleration, back-and-forth)
     private let shakeThreshold: Double = 2.2     // g, peak magnitude to count a shake "peak"
@@ -55,12 +55,13 @@ final class MotionGestureManager: NSObject, ObservableObject {
 
     // MARK: - Internal state
     private var lastFlickEdge: Date = .distantPast
-    private var pendingFlickDir: Int = 0            // 0 none, +1 right, -1 left
-    private var pendingFlickTime: Date = .distantPast
+    private var flickArmed = true
+    private var flickPeakThisEvent: Double = 0
 
     private var shakePeakTimes: [Date] = []
     private var shakeArmed = true
     private var lastShakeFire: Date = .distantPast
+    private var lastShakePeak: Date = .distantPast
 
     private func log(_ m: String) { print("🖐️ [Gesture] \(m)") }
 
@@ -84,13 +85,14 @@ final class MotionGestureManager: NSObject, ObservableObject {
         }
         isRunning = true
         WKInterfaceDevice.current().play(.start)   // "armed" confirmation
-        log("started. flick=nav, double-flick=volume, shake=play/pause")
+        log("started. flick=previous, shake=play/pause")
     }
 
     func stop() {
         guard isRunning else { return }
         motion.stopDeviceMotionUpdates()
-        pendingFlickDir = 0
+        flickArmed = true
+        flickPeakThisEvent = 0
         shakePeakTimes.removeAll()
         runtimeSession?.invalidate()
         runtimeSession = nil
@@ -110,13 +112,13 @@ final class MotionGestureManager: NSObject, ObservableObject {
 
         if mag > shakeThreshold, shakeArmed {
             shakeArmed = false
+            lastShakePeak = now
             shakePeakTimes.append(now)
             shakePeakTimes = shakePeakTimes.filter { now.timeIntervalSince($0) <= shakeWindow }
             if shakePeakTimes.count >= shakePeaksNeeded,
                now.timeIntervalSince(lastShakeFire) > shakeCooldown {
                 lastShakeFire = now
                 shakePeakTimes.removeAll()
-                pendingFlickDir = 0                 // cancel any pending flick
                 fire(.playPause)
                 return
             }
@@ -124,49 +126,47 @@ final class MotionGestureManager: NSObject, ObservableObject {
             shakeArmed = true                       // re-arm once motion settles
         }
 
-        // ---------- Resolve a pending SINGLE flick if the window expired ----------
-        if pendingFlickDir != 0,
-           now.timeIntervalSince(pendingFlickTime) > doubleWindow {
-            let dir = pendingFlickDir
-            pendingFlickDir = 0
-            fire(dir > 0 ? .next : .previous)       // it was a single
-        }
+        // ---------- FLICK (rotational / pitch) -> previous, either direction ----------
+        // Hysteresis (armed/reset), same as shake: a single continuous rotation
+        // only fires once, since it must drop back below `flickReset` before
+        // another flick can be recognised — otherwise a normal, sustained hand
+        // turn can stay above threshold long enough to fire repeatedly.
+        let pitch = abs(data.rotationRate.x)
+        flickPeakThisEvent = max(flickPeakThisEvent, pitch)
 
-        // ---------- FLICK (rotational / yaw) ----------
-        let yaw = data.rotationRate.z
-        if abs(yaw) > flickThreshold,
+        // A shake also rotates the wrist, so a flick must be a CALM rotation:
+        // low linear acceleration right now (mag < flickCalmAccel) and not
+        // within the lockout window after a recent shake peak. That's what
+        // separates a deliberate still-arm tilt from a shake.
+        let calm = mag < flickCalmAccel
+            && now.timeIntervalSince(lastShakePeak) > flickShakeLockout
+
+        if pitch > flickThreshold, flickArmed, calm,
            now.timeIntervalSince(lastFlickEdge) > flickRefractory {
+            flickArmed = false
             lastFlickEdge = now
-            let dir = yaw > 0 ? 1 : -1
-
-            if pendingFlickDir == dir,
-               now.timeIntervalSince(pendingFlickTime) <= doubleWindow {
-                // Second flick, same direction => DOUBLE
-                pendingFlickDir = 0
-                fire(dir > 0 ? .volumeUp : .volumeDown)
-            } else {
-                // If an OPPOSITE flick was pending, resolve it now as a single.
-                if pendingFlickDir != 0 {
-                    let old = pendingFlickDir
-                    fire(old > 0 ? .next : .previous)
-                }
-                pendingFlickDir = dir               // start waiting for a possible double
-                pendingFlickTime = now
+            fire(.previous)
+        } else if pitch < flickReset {
+            if flickPeakThisEvent > 0.5 {
+                // Logged for EVERY hand movement, not just ones that fire, so you
+                // can read real peak values off the console and pick a
+                // `flickThreshold` that separates casual movement from a real
+                // flick on your own wrist.
+                log("hand movement settled, peak rotationRate.x = \(String(format: "%.2f", flickPeakThisEvent)) rad/s (threshold=\(flickThreshold))")
             }
+            flickPeakThisEvent = 0
+            flickArmed = true                        // re-arm once motion settles
         }
     }
 
     // MARK: - Fire actions
 
-    private enum Action { case next, previous, volumeUp, volumeDown, playPause }
+    private enum Action { case previous, playPause }
 
     private func fire(_ action: Action) {
         switch action {
-        case .next:       log("single flick RIGHT -> next");        onNext?()
-        case .previous:   log("single flick LEFT  -> previous");    onPrevious?()
-        case .volumeUp:   log("double flick RIGHT -> volume up");   onVolumeUp?()
-        case .volumeDown: log("double flick LEFT  -> volume down"); onVolumeDown?()
-        case .playPause:  log("SHAKE -> play/pause");               onPlayPause?()
+        case .previous:  log("flick -> previous");     onPrevious?()
+        case .playPause: log("SHAKE -> play/pause");   onPlayPause?()
         }
         // Note: the confirming haptic is played inside the PlayerModel action,
         // so both buttons and gestures feel identical feedback.
