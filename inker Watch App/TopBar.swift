@@ -9,13 +9,20 @@ struct TopBar: View {
     /// Controls page where the Motion gesture toggle lives).
     var onBadgeTap: (() -> Void)? = nil
 
+    @ObservedObject private var link = ESP32Link.shared
+
     var body: some View {
-        HStack {
+        HStack(spacing: 6) {
             NavigationLink(destination: PlaylistView()) {
                 Image(systemName: "music.note.list")
                     .font(.title3)
             }
             .buttonStyle(.plain)
+
+            // BLE control-link status to the ESP32 (green = connected).
+            Circle()
+                .fill(link.isConnected ? .green : .gray)
+                .frame(width: 7, height: 7)
 
             Spacer()
 

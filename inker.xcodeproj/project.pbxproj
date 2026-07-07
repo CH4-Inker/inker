@@ -253,6 +253,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "inker-Watch-App-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = inker;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Sends playback commands to the ESP32 speaker.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Used for wrist gesture controls.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKWatchOnly = YES;
@@ -288,6 +289,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "inker-Watch-App-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = inker;
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Sends playback commands to the ESP32 speaker.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Used for wrist gesture controls.";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
 				INFOPLIST_KEY_WKWatchOnly = YES;

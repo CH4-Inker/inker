@@ -49,6 +49,7 @@ final class PlayerModel: NSObject, ObservableObject {
     private var audioPlayer: AVAudioPlayer?
     private let volumeStep: Float = 0.05
     private var playbackTimer: Timer?
+    private var lastSentVolumePercent = -1   // throttle $VOL:NN# — only send on change
 
     override init() {
         super.init()
@@ -180,6 +181,7 @@ final class PlayerModel: NSObject, ObservableObject {
         setEvent(ok ? "▶️ playing '\(currentTitle)' -> \(outputRouteName)"
                     : "❌ play() returned false")
         startPlaybackTimer()
+        if ok { ESP32Link.shared.send("PLAY") }
     }
 
     func pause() {
@@ -188,6 +190,7 @@ final class PlayerModel: NSObject, ObservableObject {
         haptic(.stop)
         setEvent("⏸️ paused")
         playbackTimer?.invalidate()
+        ESP32Link.shared.send("PAUSE")
     }
 
     private func startPlaybackTimer() {
@@ -236,6 +239,7 @@ final class PlayerModel: NSObject, ObservableObject {
         let newIndex = (currentIndex + 1) % tracks.count
         haptic(.click)
         setEvent("⏭️ next -> track \(newIndex + 1)")
+        ESP32Link.shared.send("NEXT")
         load(index: newIndex, autoplay: true)
     }
 
@@ -244,6 +248,7 @@ final class PlayerModel: NSObject, ObservableObject {
         let newIndex = (currentIndex - 1 + tracks.count) % tracks.count
         haptic(.click)
         setEvent("⏮️ previous -> track \(newIndex + 1)")
+        ESP32Link.shared.send("PREV")
         load(index: newIndex, autoplay: true)
     }
 
@@ -255,7 +260,13 @@ final class PlayerModel: NSObject, ObservableObject {
         let clamped = min(max(newValue, 0.0), 1.0)
         volume = clamped
         audioPlayer?.volume = clamped
-        setEvent("🔊 volume \(Int(clamped * 100))%")
+        let percent = Int((clamped * 100).rounded())
+        setEvent("🔊 volume \(percent)%")
+        // Throttle: Crown fires ~50×/turn — only send when the whole percent changes.
+        if percent != lastSentVolumePercent {
+            lastSentVolumePercent = percent
+            ESP32Link.shared.send("VOL:\(percent)")
+        }
     }
 
     var currentTrack: Track? {

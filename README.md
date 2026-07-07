@@ -86,10 +86,13 @@ Rotate the Crown → Volume up/down, with the system's built-in haptic detents.
    - `ContentView.swift`
    - `TopBar.swift`
    - `ThinBar.swift`
+   - `MarqueeText.swift`
+   - `ArtworkView.swift`
    - `NowPlayingView.swift`
    - `ControlsView.swift`
    - `PlaylistView.swift`
    - `GestureGuideView.swift`
+   - `ESP32Link.swift`
 3. **Add 4 audio files** named `song1.mp3 … song4.mp3` to the watch target
    (drag into the Project Navigator → check **Copy items if needed** and tick
    the **Watch App target** under *Add to targets*). Verify each file's
@@ -198,6 +201,28 @@ Every gesture-triggered action buzzes the moment it's recognised. **Feel a
 buzz → the gesture registered.** No buzz → it didn't cross the threshold. This
 lets you test sensitivity by feel, without looking at the screen.
 
+### BLE control channel (watch → ESP32 commands)
+Separate from the A2DP **audio** link: an app-managed **BLE GATT** link the
+watch opens to the ESP32 to send short command frames whenever playback is
+controlled (by gesture OR button). watchOS is BLE-only (no Classic SPP), so
+this must be BLE; the ESP32 runs BLE + A2DP together in dual mode.
+
+- **Frame format:** `$PAYLOAD#` (starts `$`, ends `#`).
+- **Payloads:** `$NEXT#`, `$PREV#`, `$PLAY#`, `$PAUSE#`, `$VOL:NN#` (NN 0–100,
+  sent only when the whole percent changes so the Crown can't flood it).
+- **UUIDs** (must match both sides): service `0000A100-…`, write char
+  `0000A101-…` (`ESP32Link.swift` ↔ `CTRL_*_UUID` in the sketch).
+- **Watch side:** `ESP32Link.shared` (`CBCentralManager`) auto-scans, connects,
+  writes (write-without-response). Green dot in the top bar = link connected.
+- **ESP32 side:** `startBLEControl()` advertises the service; `handleCommand()`
+  is the hook where LED animations will be driven (logs for now).
+- **Debug:** ESP32 Serial prints `[CTRL] command: 'NEXT'` etc. on each frame.
+
+> **Coexistence caveat:** A2DP (Classic) + BLE on one ESP32 is memory-heavy —
+> needs a **Huge APP** partition and dual-mode controller. If A2DP fails to
+> start after adding BLE, check the partition scheme and the BLE/A2DP init
+> order in `setup()`.
+
 ### Quick end-to-end check
 1. Flash ESP32, open Serial Monitor → boot lines + "A2DP sink started."
 2. Pair "Interactive Speaker" on the watch → ESP32 prints `CONNECTED`.
@@ -218,11 +243,10 @@ lets you test sensitivity by feel, without looking at the screen.
 ---
 
 ## What's next (not in this build)
-- **LED face animation** over a separate BLE link: the watch sends face-state
-  commands, the ESP32 renders the animation. The ESP32 sketch already has the
-  `audio_state_changed()` hook where playing/idle states can drive the LEDs;
-  the watch app would add a `CBCentralManager` to send face-state bytes. Say the
-  word to add this layer.
+- **LED face animation.** The BLE control channel now exists (watch sends
+  `$NEXT#`/`$PLAY#`/… on every action — see "BLE control channel" above);
+  `handleCommand()` in the sketch is the hook where those commands would drive
+  an LED strip. Only the LED rendering itself is left to build.
 
 ## File map
 ```
@@ -230,11 +254,14 @@ InteractiveSpeaker/
 ├── README.md
 ├── watchapp/
 │   ├── InteractiveSpeakerApp.swift   app entry point
-│   ├── PlayerModel.swift             playlist, playback, volume, progress, route + haptics + logs
+│   ├── PlayerModel.swift             playlist (mp3 ID3 metadata), playback, volume, progress, ESP32 sends
 │   ├── MotionGestureManager.swift    flick/shake detection engine (previous/play-pause)
+│   ├── ESP32Link.swift               BLE central: sends $CMD# control frames to ESP32
 │   ├── ContentView.swift             paging container: Crown + Double Tap wiring, gesture callbacks
-│   ├── TopBar.swift                  shared header: playlist button, Gesture ON badge
+│   ├── TopBar.swift                  shared header: playlist button, BLE dot, Gesture badge
 │   ├── ThinBar.swift                 thin rounded progress/volume bar (seekable variant)
+│   ├── MarqueeText.swift             single-line auto-scrolling text (long titles)
+│   ├── ArtworkView.swift             cover art from mp3 ID3, placeholder fallback
 │   ├── NowPlayingView.swift          page 1: title/artist/seek bar, last-gesture card
 │   ├── ControlsView.swift            page 2: transport, volume, Motion gesture toggle
 │   ├── PlaylistView.swift            track list, tap to play/pause
