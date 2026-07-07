@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import Combine
 import WatchKit
+import UIKit
 
 /// Owns the playlist and the AVAudioPlayer. All playback control goes through
 /// here. Heavily logged — every action prints to the Xcode console so you can
@@ -10,13 +11,18 @@ import WatchKit
 @MainActor
 final class PlayerModel: NSObject, ObservableObject {
 
-    private let trackFileNames = ["song1", "song2", "song3", "song4"]
-    private let trackExtension = "mp3"
-    let trackTitles = ["Track One", "A Very Long Song Name That Should Scroll", "Track Three", "Track Four"]
-    let trackArtists = ["Unknown Artist", "Unknown Artist", "Unknown Artist", "Unknown Artist"]
-    /// Asset-catalog image names for cover art. Add matching images to
-    /// Assets.xcassets; missing ones fall back to a placeholder icon.
-    let trackArtworks = ["cover1", "cover2", "cover3", "cover4"]
+    /// One playable song, with title/artist/artwork read from its mp3 ID3 tags.
+    struct Track: Identifiable {
+        let id = UUID()
+        let url: URL
+        let title: String
+        let artist: String
+        let artwork: UIImage?
+    }
+
+    /// Built once at launch from every mp3 in the app bundle's `Songs` folder
+    /// (falling back to the bundle root). No hardcoded titles/artists/artwork.
+    @Published private(set) var tracks: [Track] = []
 
     @Published private(set) var currentIndex = 0
     @Published private(set) var isPlaying = false
@@ -50,7 +56,45 @@ final class PlayerModel: NSObject, ObservableObject {
         configureAudioSession()
         observeRouteChanges()
         updateRoute(reason: "startup")
+        buildPlaylist()
         load(index: currentIndex, autoplay: false)
+    }
+
+    /// Scans the bundle for mp3s (in the `Songs` folder first, else the root)
+    /// and reads title/artist/artwork from each file's ID3 metadata.
+    private func buildPlaylist() {
+        // Recursively scan the whole app bundle for mp3s — works whether the
+        // Songs folder lands as a real subdirectory, a flattened group, or the
+        // files sit at the bundle root.
+        var found: [URL] = []
+        if let root = Bundle.main.resourceURL,
+           let en = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) {
+            for case let u as URL in en where u.pathExtension.lowercased() == "mp3" {
+                found.append(u)
+            }
+        }
+        let urls = found.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+        log("bundle mp3 scan found \(urls.count): \(urls.map { $0.lastPathComponent })")
+
+        tracks = urls.map { url in
+            let meta = AVAsset(url: url).commonMetadata
+            let title = string(from: meta, .commonIdentifierTitle)
+                ?? url.deletingPathExtension().lastPathComponent
+            let artist = string(from: meta, .commonIdentifierArtist) ?? "Unknown Artist"
+            let art = AVMetadataItem
+                .metadataItems(from: meta, filteredByIdentifier: .commonIdentifierArtwork)
+                .first?.dataValue
+                .flatMap(UIImage.init(data:))
+            return Track(url: url, title: title, artist: artist, artwork: art)
+        }
+        log("playlist built: \(tracks.count) tracks")
+    }
+
+    private func string(from meta: [AVMetadataItem], _ id: AVMetadataIdentifier) -> String? {
+        let v = AVMetadataItem.metadataItems(from: meta, filteredByIdentifier: id).first?.stringValue
+        return (v?.isEmpty == false) ? v : nil
     }
 
     // MARK: - Logging helpers
@@ -105,23 +149,22 @@ final class PlayerModel: NSObject, ObservableObject {
 
     // MARK: - Loading
     private func load(index: Int, autoplay: Bool) {
-        guard trackFileNames.indices.contains(index) else { return }
-        let name = trackFileNames[index]
-        log("loading '\(name).\(trackExtension)' (autoplay=\(autoplay))")
-
-        guard let url = Bundle.main.url(forResource: name, withExtension: trackExtension) else {
-            setEvent("❌ MISSING FILE: \(name).\(trackExtension) — not added to target")
+        guard tracks.indices.contains(index) else {
+            setEvent("❌ no track at index \(index) (playlist has \(tracks.count))")
             return
         }
+        let track = tracks[index]
+        log("loading '\(track.title)' (autoplay=\(autoplay))")
+
         do {
-            let newPlayer = try AVAudioPlayer(contentsOf: url)
+            let newPlayer = try AVAudioPlayer(contentsOf: track.url)
             newPlayer.delegate = self
             newPlayer.volume = volume
             newPlayer.prepareToPlay()
             audioPlayer = newPlayer
             currentIndex = index
             currentTime = 0
-            log("loaded '\(name)' duration=\(String(format: "%.1f", newPlayer.duration))s")
+            log("loaded '\(track.title)' duration=\(String(format: "%.1f", newPlayer.duration))s")
             if autoplay { play() } else { isPlaying = false }
         } catch {
             setEvent("❌ load failed: \(error.localizedDescription)")
@@ -189,14 +232,16 @@ final class PlayerModel: NSObject, ObservableObject {
     }
 
     func next() {
-        let newIndex = (currentIndex + 1) % trackFileNames.count
+        guard !tracks.isEmpty else { return }
+        let newIndex = (currentIndex + 1) % tracks.count
         haptic(.click)
         setEvent("⏭️ next -> track \(newIndex + 1)")
         load(index: newIndex, autoplay: true)
     }
 
     func previous() {
-        let newIndex = (currentIndex - 1 + trackFileNames.count) % trackFileNames.count
+        guard !tracks.isEmpty else { return }
+        let newIndex = (currentIndex - 1 + tracks.count) % tracks.count
         haptic(.click)
         setEvent("⏮️ previous -> track \(newIndex + 1)")
         load(index: newIndex, autoplay: true)
@@ -213,13 +258,12 @@ final class PlayerModel: NSObject, ObservableObject {
         setEvent("🔊 volume \(Int(clamped * 100))%")
     }
 
-    var currentTitle: String {
-        trackTitles.indices.contains(currentIndex) ? trackTitles[currentIndex] : "—"
+    var currentTrack: Track? {
+        tracks.indices.contains(currentIndex) ? tracks[currentIndex] : nil
     }
 
-    var currentArtist: String {
-        trackArtists.indices.contains(currentIndex) ? trackArtists[currentIndex] : "—"
-    }
+    var currentTitle: String { currentTrack?.title ?? "—" }
+    var currentArtist: String { currentTrack?.artist ?? "—" }
 
     var duration: TimeInterval {
         audioPlayer?.duration ?? 0

@@ -1,17 +1,17 @@
 import SwiftUI
 import UIKit
 
-/// Rounded-square cover art from the asset catalog, with a graceful placeholder
-/// (music note on a tinted square) when the named image isn't present.
+/// Cover art (from a track's embedded mp3 ID3 artwork), with a graceful
+/// placeholder (music note on a tinted square/circle) when it has none.
 struct ArtworkView: View {
-    let name: String
+    let image: UIImage?
     var size: CGFloat = 36
     var circle: Bool = false
 
     var body: some View {
         Group {
-            if let ui = UIImage(named: name) {
-                Image(uiImage: ui)
+            if let image {
+                Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
             } else {
