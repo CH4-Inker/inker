@@ -1,5 +1,5 @@
 /*
- * Interactive Speaker — ESP32 Bluetooth (A2DP) audio sink  [DEBUG BUILD]
+ * Inker — ESP32 Bluetooth (A2DP) audio sink  [DEBUG BUILD]
  * ------------------------------------------------------------
  * Turns the ESP32 into a Bluetooth speaker. Heavy Serial logging so you can
  * see exactly what is happening: pairing, connection, playback, and whether
@@ -91,7 +91,7 @@ class CtrlServerCallbacks : public BLEServerCallbacks {
 
 void startBLEControl() {
   Serial.println("[CTRL] startBLEControl() begin");
-  BLEDevice::init("Interactive Speaker");
+  BLEDevice::init("Inker");
   Serial.println("[CTRL] BLEDevice::init done");
   BLEServer* server = BLEDevice::createServer();
   server->setCallbacks(new CtrlServerCallbacks());
@@ -114,7 +114,7 @@ void startBLEControl() {
   adv->setAdvertisementData(advData);
 
   BLEAdvertisementData scanResp;
-  scanResp.setName("Interactive Speaker");
+  scanResp.setName("Inker");
   adv->setScanResponseData(scanResp);
 
   BLEDevice::startAdvertising();
@@ -186,7 +186,7 @@ void setup() {
   delay(300);
   Serial.println();
   Serial.println("========================================");
-  Serial.println(" Interactive Speaker — A2DP sink booting");
+  Serial.println(" Inker — A2DP sink booting");
   Serial.println(" FIRMWARE BUILD: A2DP + BLE control");   // <-- if you DON'T see this line, the new firmware didn't flash
   Serial.println("========================================");
 
@@ -212,10 +212,10 @@ void setup() {
   // init order / partition is the first thing to check.
   startBLEControl();
 
-  a2dp_sink.start("Interactive Speaker");
+  a2dp_sink.start("Inker");
 
   Serial.println("[BT] A2DP sink started.");
-  Serial.println("[BT] Now on the watch: Settings > Bluetooth > pair 'Interactive Speaker'.");
+  Serial.println("[BT] Now on the watch: Settings > Bluetooth > pair 'Inker'.");
   Serial.println("[BT] BLE control channel runs in parallel (app connects automatically).");
   Serial.println("----------------------------------------");
 }

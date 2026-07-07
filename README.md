@@ -1,4 +1,4 @@
-# Interactive Speaker — watchOS + ESP32
+# Inker — watchOS + ESP32
 
 A **standalone Apple Watch app** that plays 4 local songs and streams them to an
 **ESP32 Bluetooth speaker**, controlled by on-screen buttons, motion gestures,
@@ -86,7 +86,6 @@ Rotate the Crown → Volume up/down, with the system's built-in haptic detents.
    - `ContentView.swift`
    - `TopBar.swift`
    - `ThinBar.swift`
-   - `MarqueeText.swift`
    - `ArtworkView.swift`
    - `NowPlayingView.swift`
    - `ControlsView.swift`
@@ -159,7 +158,7 @@ so casual movement never crosses it but a deliberate flick reliably does.
 2. Tools → Board → select your ESP32 (e.g. "ESP32 Dev Module").
 3. Tools → Partition Scheme → a BT-capable scheme (e.g. **Huge APP**).
 4. Flash `esp32/esp32_a2dp_speaker.ino`.
-5. On the watch: Settings → Bluetooth → pair **"Interactive Speaker"**.
+5. On the watch: Settings → Bluetooth → pair **"Inker"**.
    Once connected, app audio streams to it automatically.
 
 ---
@@ -185,7 +184,7 @@ Key lines to watch, in order:
 ### watchOS — Xcode console (tagged logs)
 - `🎵 [Player]` — loading, play/pause, and errors like `❌ MISSING FILE`.
 - `🎚️ route` — **where audio is going.** Want to see
-  `route [play] -> 'Interactive Speaker' ✅ Bluetooth`. If it says
+  `route [play] -> 'Inker' ✅ Bluetooth`. If it says
   `⚠️ NOT bluetooth`, the watch is playing to itself, not the ESP32.
 - `🖐️ [Gesture]` — every detected flick/shake with its measured values.
 
@@ -225,7 +224,7 @@ this must be BLE; the ESP32 runs BLE + A2DP together in dual mode.
 
 ### Quick end-to-end check
 1. Flash ESP32, open Serial Monitor → boot lines + "A2DP sink started."
-2. Pair "Interactive Speaker" on the watch → ESP32 prints `CONNECTED`.
+2. Pair "Inker" on the watch → ESP32 prints `CONNECTED`.
 3. Run the watch app, press Play → watch dot **green**, console route = ESP32.
 4. ESP32 `[STATUS]` shows **data packets > 0** → working end to end.
 
@@ -260,7 +259,6 @@ InteractiveSpeaker/
 │   ├── ContentView.swift             paging container: Crown + Double Tap wiring, gesture callbacks
 │   ├── TopBar.swift                  shared header: playlist button, BLE dot, Gesture badge
 │   ├── ThinBar.swift                 thin rounded progress/volume bar (seekable variant)
-│   ├── MarqueeText.swift             single-line auto-scrolling text (long titles)
 │   ├── ArtworkView.swift             cover art from mp3 ID3, placeholder fallback
 │   ├── NowPlayingView.swift          page 1: title/artist/seek bar, last-gesture card
 │   ├── ControlsView.swift            page 2: transport, volume, Motion gesture toggle
