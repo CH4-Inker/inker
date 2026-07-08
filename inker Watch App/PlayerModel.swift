@@ -173,11 +173,13 @@ final class PlayerModel: NSObject, ObservableObject {
     }
 
     // MARK: - Transport
+    // Note: transport methods (play/pause) no longer buzz — the haptic fires in
+    // the semantic action methods below (next/previous/togglePlayPause/select)
+    // so every trigger (gesture, button, playlist) gets exactly one buzz.
     func play() {
         let ok = audioPlayer?.play() ?? false
         isPlaying = ok
         updateRoute(reason: "play")
-        haptic(.start)
         setEvent(ok ? "▶️ playing '\(currentTitle)' -> \(outputRouteName)"
                     : "❌ play() returned false")
         startPlaybackTimer()
@@ -187,7 +189,6 @@ final class PlayerModel: NSObject, ObservableObject {
     func pause() {
         audioPlayer?.pause()
         isPlaying = false
-        haptic(.stop)
         setEvent("⏸️ paused")
         playbackTimer?.invalidate()
         ESP32Link.shared.send("PAUSE")
@@ -218,6 +219,7 @@ final class PlayerModel: NSObject, ObservableObject {
         if index == currentIndex {
             togglePlayPause()
         } else {
+            haptic(.directionUp)
             load(index: index, autoplay: true)
         }
     }
@@ -231,13 +233,14 @@ final class PlayerModel: NSObject, ObservableObject {
 
     func togglePlayPause() {
         log("togglePlayPause (was playing=\(isPlaying))")
+        haptic(.directionUp)
         isPlaying ? pause() : play()
     }
 
     func next() {
         guard !tracks.isEmpty else { return }
         let newIndex = (currentIndex + 1) % tracks.count
-        haptic(.click)
+        haptic(.directionUp)
         setEvent("⏭️ next -> track \(newIndex + 1)")
         ESP32Link.shared.send("NEXT")
         load(index: newIndex, autoplay: true)
@@ -246,7 +249,7 @@ final class PlayerModel: NSObject, ObservableObject {
     func previous() {
         guard !tracks.isEmpty else { return }
         let newIndex = (currentIndex - 1 + tracks.count) % tracks.count
-        haptic(.click)
+        haptic(.directionUp)
         setEvent("⏮️ previous -> track \(newIndex + 1)")
         ESP32Link.shared.send("PREV")
         load(index: newIndex, autoplay: true)
