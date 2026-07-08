@@ -154,12 +154,12 @@ Instead of direct finger gestures or standard buttons only, we implemented a hyb
 
 ### About the Frameworks
 *Does your use case genuinely need both frameworks working together, or could it work with just your main one?*
-*   **Yes**, our use case relies on a coordinated multi-framework pipeline to handle inputs, audio processing, and peripheral communication:
-    1.  **Core Motion**: Captures accelerometer and gyroscope data to detect wrist movements and translate them into physical media triggers (flicks and shakes).
-    2.  **App Intents (Siri Shortcuts)** *(Under Active Development)*: We are currently developing Siri Shortcuts integration using the **App Intents** framework. This will expose playback commands directly to voice control, allowing hands-free shortcuts (e.g. telling Siri to control the speaker).
-    3.  **AVFoundation**: Acts as the central player engine, loading local MP3 files, decoding them, and routing audio output via Bluetooth A2DP.
-    4.  **Core Bluetooth**: Establishes a BLE connection to send control frames (e.g., `$PLAY#`, `$NEXT#`, volume packets) to the ESP32 to drive display updates and LED states.
-*   **Why they must coexist**: They form an integrated pipeline: **Core Motion** and **App Intents** capture the user's input intent (motion and voice), **AVFoundation** executes the audio actions, and **Core Bluetooth** mirrors that state to the physical ESP32 speaker. A single framework cannot bridge these layers.
+*   **Yes**, our use case relies on a coordinated multi-framework pipeline to handle inputs, audio processing, and peripheral communication, with **Core Bluetooth** acting as the core framework connecting the Apple Watch to the IoT speaker:
+    1.  **Core Bluetooth**: Our core integration framework. It establishes a BLE connection to send control frames (e.g., `$PLAY#`, `$NEXT#`, volume packets) to the ESP32 to drive display updates and LED states.
+    2.  **Core Motion**: Captures accelerometer and gyroscope data to detect wrist movements and translate them into physical media triggers (flicks and shakes).
+    3.  **App Intents (Siri Shortcuts)** *(Under Active Development)*: We are currently developing Siri Shortcuts integration using the **App Intents** framework. This will expose playback commands directly to voice control, allowing hands-free shortcuts (e.g. telling Siri to control the speaker).
+    4.  **AVFoundation**: Acts as the central player engine, loading local MP3 files, decoding them, and routing audio output via Bluetooth A2DP.
+*   **Why they must coexist**: They form an integrated pipeline: **Core Bluetooth** manages the primary control connection to the physical ESP32 companion device, while **Core Motion** and **App Intents** capture the user's input intent (motion gestures and voice shortcuts) to update the playback state, and **AVFoundation** handles the actual local audio playback. A single framework cannot bridge these layers.
 
 ### About Accessibility and Localization
 *What did you decide to support, what did you decide not to, and why? "We didn't localize" is a fine answer if you can say why, "we didn't think about it" is not.*
