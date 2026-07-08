@@ -2129,6 +2129,14 @@ void renderAmbient() {
   delay(30);
 }
 
+// A2DP connection / audio state. Declared here (before handleCommand) so the
+// BLE command handler can check whether the audio link is actually connected.
+volatile uint32_t g_dataPackets = 0;
+volatile uint32_t g_dataBytes   = 0;
+int g_connState = -1;
+int g_audioState = -1;
+unsigned long g_lastStatus = 0;
+
 // ============================================================
 //  BLE control channel (watch -> ESP32 command frames)
 // ------------------------------------------------------------
@@ -2144,6 +2152,15 @@ String g_rxBuffer;   // accumulates bytes until a full "$...#" frame arrives
 // let loop() render it. Never call the blocking play*() helpers from here.
 void handleCommand(const String& cmd) {
   Serial.printf("[CTRL] command: '%s'\n", cmd.c_str());
+
+  // Only respond when the watch's Bluetooth audio (A2DP) is actually connected.
+  // The BLE control link can be up before/without audio pairing, but we ignore
+  // its commands until the speaker is truly connected to this watch.
+  if (g_connState != ESP_A2D_CONNECTION_STATE_CONNECTED) {
+    Serial.printf("[CTRL] ignored '%s' (Bluetooth audio not connected)\n", cmd.c_str());
+    return;
+  }
+
   if      (cmd == "NEXT")  pendingAnim = 1;   // forward animation
   else if (cmd == "PREV")  pendingAnim = 2;   // backward animation
   else if (cmd == "PLAY")  pendingAnim = 3;   // play animation -> playing face
@@ -2217,14 +2234,8 @@ void startBLEControl() {
 }
 
 // ============================================================
-//  A2DP status + callbacks
+//  A2DP callbacks
 // ============================================================
-volatile uint32_t g_dataPackets = 0;
-volatile uint32_t g_dataBytes   = 0;
-int g_connState = -1;
-int g_audioState = -1;
-unsigned long g_lastStatus = 0;
-
 void connection_state_changed(esp_a2d_connection_state_t state, void* /*ptr*/) {
   g_connState = (int)state;
   Serial.print("[BT] Connection state -> ");
@@ -2333,10 +2344,13 @@ void loop() {
   if (pendingAnim != 0) {
     int a = pendingAnim;
     pendingAnim = 0;
-    if      (a == 1) playForward();
-    else if (a == 2) playBackward();
-    else if (a == 3) { playPlay();  isPlaying = true;  }
-    else if (a == 4) { playPause(); isPlaying = false; }
+    // NEXT / PREV: the new song auto-plays, so go straight to the playing face.
+    // The watch sends a redundant PLAY right after NEXT/PREV — it becomes a
+    // no-op below because isPlaying is already true, so no extra play animation.
+    if      (a == 1) { playForward();  isPlaying = true; }
+    else if (a == 2) { playBackward(); isPlaying = true; }
+    else if (a == 3) { if (!isPlaying) { playPlay();  isPlaying = true;  } }  // animate only if was paused
+    else if (a == 4) { if (isPlaying)  { playPause(); isPlaying = false; } }  // animate only if was playing
     lastBlinkTime = millis();   // reset idle timers after the animation
     moveTime = lastBlinkTime;
     return;
