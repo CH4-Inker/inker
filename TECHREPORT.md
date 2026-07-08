@@ -166,6 +166,7 @@ Instead of direct finger gestures or standard buttons only, we implemented a hyb
 *   **Accessibility (Decisions & Trade-offs)**:
     *   *The Gesture Constraint*: We recognized that our custom wrist flick and shake gestures require full wrist mobility and are not accessible to users with motor impairments or tremors.
     *   *Eyes-Free & Visual Accessibility*: We implemented distinct **haptic feedback profiles** (different haptic patterns for flick, shake, volume, and playback state changes). This allows users with visual impairments to confidently control the system "eyes-free" through tactile confirmation.
+    *   *Dark Mode Design (Visual Comfort & Battery)*: The interface operates in a high-contrast **Dark Mode** to optimize readability in direct sunlight or active outdoor settings, while simultaneously reducing battery draw on the Apple Watch OLED display.
     *   *System Integration*: We integrated Apple's native **Double Tap** (pinch) gesture for the "Next track" action, allowing users with compatible watches to leverage Apple's highly optimized, low-effort assistive accessibility hook.
 *   **Localization**: We did not localize the app text because the interface relies almost entirely on universal media control iconography (Play/Pause, Fast Forward, Rewind, Speaker icons). The limited text is basic terminology (like song titles) which does not require localization for our current target audience.
 
