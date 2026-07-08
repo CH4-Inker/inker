@@ -65,11 +65,11 @@ And here is the first version of the schematic we designed to connect the ESP32 
 ### 🔍 What we browsed, and what surprised us:
 *   **DAC Module Availability**: We were surprised to find that the `MAX98357A` DAC module was out of stock locally. Ordering it online would take too long, jeopardizing our timeline.
 *   **watchOS Gesture Limitations**: We discovered that Apple restricts third-party access to the system's "double pinch" (pitch) and "clench" AssistiveTouch gestures. We had to pivot to custom-designed gestures using the accelerometer/gyroscope.
-*   **watchOS Networking Restrictions**: Apple blocks standard low-level TCP/UDP socket connections in standalone watchOS apps. Only high-level protocols via the Foundation Framework (`URLSession`) are officially supported.
+*   **watchOS Networking Restrictions**: Apple blocks standard low-level TCP/UDP socket connections in standalone watchOS apps. Only high-level protocols via the Foundation framework (`URLSession`) are officially supported.
 
 ### 🛠️ What we actually built or tested in code (not just read about):
 *   **watchOS to ESP32 Networking**: Built a custom TCP/UDP client on the watch to connect to ESP32's Wi-Fi Access Point. As expected, watchOS blocked it at runtime.
-*   **Bluetooth Core Framework**: Switched to Bluetooth and built a working Core Bluetooth service on watchOS to scan and connect with the ESP32.
+*   **Core Bluetooth**: Switched to Bluetooth and built a working Core Bluetooth service on watchOS to scan and connect with the ESP32.
 *   **OLED Screen Animations**: Designed pixel art animations in **Aseprite**, exported them to byte arrays, and successfully simulated them in Wokwi before transferring to physical hardware.
     
     ![Testing OLED animations in Wokwi](docs/Trying%20out%20Animation%20in%20Wokwi%20from%20Array%20that%20was%20first%20made%20in%20Aesprite.png)
@@ -83,7 +83,7 @@ And here is the first version of the schematic we designed to connect the ESP32 
 
 ## ♻️ 4. What We Tried and Dropped
 
-### 🌐 1. watchOS Low-Level Network Framework
+### 🌐 1. Network framework
 *   **We considered**: Using the native low-level Network framework (TCP/UDP) to transmit controls directly from the watch to the ESP32.
 *   **We dropped it because**: watchOS limits low-level sockets. Apple enforces this sandbox rule on watchOS specifically (it works fine on iOS), blocking local TCP/UDP socket connections (see [Apple Technote 3135](https://developer.apple.com/documentation/technotes/tn3135-low-level-networking-on-watchos)). We moved to **Core Bluetooth** for control frames and **Bluetooth Classic A2DP** for audio streaming.
 
@@ -110,7 +110,7 @@ And here is the first version of the schematic we designed to connect the ESP32 
 ### 🧠 The Limits of AI in Hardware Development
 As we moved into physical integration with the ESP32 and its modules, we hit a wall with LLM/AI assistance:
 *   **Hallucinated Pinouts & Schematics**: AI was unreliable for hardware design, repeatedly suggesting incorrect wiring configurations and pin mappings that could have damaged our components.
-*   **Missing API Limitations**: AI models consistently failed to identify the watchOS network framework socket limitations, causing us to waste days debugging TCP/UDP connections that Apple blocks by design.
+*   **Missing API Limitations**: AI models consistently failed to identify the Network framework socket limitations in watchOS, causing us to waste days debugging TCP/UDP connections that Apple blocks by design.
 *   **Our Solution**: We stopped relying on AI for hardware and turned to real human-authored articles, official developer documentation, YouTube electronics guides, and direct consultation with external hardware engineer friends who understand electronics.
 
 ### ⚡ Battery and Power Distribution Confusions
@@ -165,8 +165,7 @@ Instead of direct finger gestures or standard buttons only, we implemented a hyb
 *What did you decide to support, what did you decide not to, and why? "We didn't localize" is a fine answer if you can say why, "we didn't think about it" is not.*
 *   **Accessibility (Decisions & Trade-offs)**:
     *   *The Gesture Constraint*: We recognized that our custom wrist flick and shake gestures require full wrist mobility and are not accessible to users with motor impairments or tremors.
-    *   *Eyes-Free & Visual Accessibility*: We implemented distinct **haptic feedback profiles** (different haptic patterns for flick, shake, volume, and playback state changes). This allows users with visual impairments to confidently control the system "eyes-free" through tactile confirmation.
-    *   *Dark Mode Design (Visual Comfort & Battery)*: The interface operates in a high-contrast **Dark Mode** to optimize readability in direct sunlight or active outdoor settings, while simultaneously reducing battery draw on the Apple Watch OLED display.
+    *   *Non-Visual Operation (Eyes-Free Haptic UI)*: Since watchOS is a dark-only operating system without a Light Mode option, dark mode is simply a system-wide appearance setting rather than a distinct accessibility choice. Instead, we designed our app from the perspective that **it does not require the user to visually look at the watch screen to control it**. To achieve this, every gesture (flick and shake) and physical/button control triggers distinct, unique haptic feedback vibration patterns (clicks, start/stops, and detents). This allows blind or visually impaired users—as well as active users running or doing sports—to operate the media controls completely eyes-free through tactile haptic confirmation.
     *   *System Integration*: We integrated Apple's native **Double Tap** (pinch) gesture for the "Next track" action, allowing users with compatible watches to leverage Apple's highly optimized, low-effort assistive accessibility hook.
 *   **Localization**: We did not localize the app text because the interface relies almost entirely on universal media control iconography (Play/Pause, Fast Forward, Rewind, Speaker icons). The limited text is basic terminology (like song titles) which does not require localization for our current target audience.
 
