@@ -1,40 +1,312 @@
 /*
- * Inker — ESP32 A2DP audio sink + animated OLED face
+ * Inker v2 — integrated build: A2DP audio sink + BLE control + 2 servos +
+ * animated OLED face (bitmap frame animations).
  * ------------------------------------------------------------
- * Bluetooth speaker (A2DP) + BLE control channel from the watch app.
- * The watch (see inker Watch App) streams audio over Bluetooth Classic and
- * sends "$CMD#" control frames over BLE on every button / gesture:
- *     $PLAY#  $PAUSE#  $NEXT#  $PREV#  $VOL:NN#
- * Those commands drive an animated face on a 128x64 SSD1306 OLED.
- * Ported from led-test.ino — physical buttons replaced by BLE commands.
+ * Merges:
+ *   - esp32/a2dp_dac              (A2DP sink, superseded here by the I2S/BLE
+ *                                   version from your friend's "Inker" build)
+ *   - esp32/doble_servo_copy_...  (servo sweep — trimmed from 3 servos to 2,
+ *                                   moved off GPIO21 which the OLED needs)
+ *   - Downloads/inker.ino         (bitmap-frame face animation: forward /
+ *                                   backward / play / pause / idle-blink /
+ *                                   playing-loop — replaces the old placeholder
+ *                                   rectangle eyes)
  *
- * HARDWARE: ORIGINAL ESP32 (WROOM / WROVER) — needs Classic Bluetooth for A2DP.
- * AUDIO:    I2S DAC/amp (MAX98357A / PCM5102) on the pins below.
- * DISPLAY:  SSD1306 128x64 OLED on I2C (SDA=21, SCL=22 — ESP32 defaults).
- * LIBS:     "ESP32-A2DP" (pschatzmann), "Adafruit GFX", "Adafruit SSD1306".
+ * HARDWARE: ORIGINAL ESP32 (WROOM / WROVER) only — needs Classic Bluetooth
+ *           for A2DP, running alongside BLE in dual mode.
+ *
+ * PIN MAP
+ *   Internal DAC audio out (fixed pins, not configurable):
+ *     GPIO25 = DAC channel 1 (right), GPIO26 = DAC channel 2 (left)
+ *     -> coupling cap -> amp (e.g. LM386) -> speaker
+ *   Servo 1 = GPIO13, Servo 2 = GPIO4
+ *   OLED (SSD1306 128x64, I2C, addr 0x3C): SDA = GPIO21, SCL = GPIO22 (ESP32 defaults)
+ *
+ * NOTE: internal DAC is 8-bit (A2DP audio is 16-bit), so a faint hiss is a
+ * hardware limit, not a bug. For clean audio, switch to an external I2S DAC.
+ *
+ * LIBRARIES (Arduino Library Manager):
+ *   "ESP32-A2DP" by pschatzmann, "ESP32Servo", "Adafruit GFX Library",
+ *   "Adafruit SSD1306". BLE (BLEDevice/BLEServer/BLEUtils) ships with the
+ *   ESP32 Arduino core.
+ *
+ * BOARD SETTINGS: use a partition scheme with more app space (e.g. "Huge APP
+ * (3MB No OTA/1MB SPIFFS)") — BT Classic + BLE dual mode plus A2DP, Servo,
+ * and Adafruit GFX together need more flash than the default scheme.
+ *
+ * BLE control UUIDs MUST match ESP32Link.swift on the watch — these were
+ * regenerated for v2 because the old ones (0000A100.../0000A101...) collided
+ * with another ESP32 nearby. Update the watch-side app to match.
  */
 
-#include "ESP_I2S.h"
 #include "BluetoothA2DPSink.h"
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#include <ESP32Servo.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-// ---- Audio (I2S) — do not reuse these pins for anything else ----
-const uint8_t I2S_BCLK = 5;    // Audio bit clock
-const uint8_t I2S_WS   = 25;   // Word select (LRC)
-const uint8_t I2S_DOUT = 26;   // Data out to DAC/amp (DIN)
+const char* DEVICE_NAME = "Inker v2";
 
-I2SClass i2s;
-BluetoothA2DPSink a2dp_sink(i2s);
+// ============================================================
+//  Audio (A2DP -> internal DAC, GPIO25/GPIO26 — fixed by hardware)
+// ============================================================
+BluetoothA2DPSink a2dp_sink;
 
-// ---- Display (OLED, I2C) ----
-#define SCREEN_WIDTH  128
+// The library's default volume curve (A2DPDefaultVolumeControl) only ever
+// attenuates — its clipping limit tops out just under 1.0x gain, so it can
+// never make quiet audio louder than what the source (the watch) sends. The
+// watch's own AVRCP volume reports low, so playback stays quiet no matter
+// what. This class uses that same exponential curve but doubles the result;
+// update_audio_data() (inherited from A2DPVolumeControl, unchanged) still
+// clips each sample to the valid 16-bit range, so loud passages saturate
+// cleanly instead of wrapping/overflowing.
+constexpr float AUDIO_GAIN = 2.0f;   // software amplification factor
+
+class DoubleGainVolumeControl : public A2DPVolumeControl {
+ public:
+  void set_volume(uint8_t volume) override {
+    constexpr float base = 1.4f;
+    constexpr float bits = 12.0f;
+    constexpr float zero_ofs = pow(base, -bits);
+    constexpr float scale = pow(2.0f, bits);
+    float f = (pow(base, volume * bits / 127.0f - bits) - zero_ofs) * scale /
+              (1.0f - zero_ofs);
+    volumeFactor = (int32_t)(f * AUDIO_GAIN);
+  }
+};
+
+DoubleGainVolumeControl g_volumeControl;
+
+// ============================================================
+//  BLE control channel (watch -> ESP32 command frames)
+// ------------------------------------------------------------
+//  The watch (BLE central) writes short "$CMD#" frames here when the user
+//  controls playback. Runs alongside A2DP in dual mode (BR/EDR + BLE).
+//  UUIDs MUST match ESP32Link.swift on the watch.
+// ============================================================
+#define CTRL_SERVICE_UUID "0000A100-0000-1000-8000-00805F9B34FB"
+#define CTRL_CHAR_UUID    "0000A101-0000-1000-8000-00805F9B34FB"
+
+String g_rxBuffer;   // accumulates bytes until a full "$...#" frame arrives
+
+// Playback state: true = song playing, false = paused/idle. Drives which face
+// animation renderAmbient() shows; set from the pendingAnim dispatch in loop().
+volatile bool isPlaying = false;
+volatile int g_bleVolume = 0;   // last volume from "$VOL:xx#" BLE command, 0-100
+
+// Animation requested by a BLE command. Set here (fast), rendered in loop() so
+// we never block the BLE stack while audio is streaming.
+// 0=none, 1=forward(NEXT), 2=backward(PREV), 3=play(PLAY), 4=pause(PAUSE)
+volatile int pendingAnim = 0;
+
+// Act on one parsed command (payload WITHOUT the $ and #). Keep this fast —
+// only flag work for loop() to do; never call the blocking play*() helpers here.
+void handleCommand(const String& cmd) {
+  Serial.printf("[CTRL] command: '%s'\n", cmd.c_str());
+  if (cmd == "NEXT")       { triggerServo2Pulse(); pendingAnim = 1; }
+  else if (cmd == "PREV")  { triggerServo2Pulse(); pendingAnim = 2; }
+  else if (cmd == "PLAY")  { triggerServo2Pulse(); pendingAnim = 3; }
+  else if (cmd == "PAUSE") { triggerServo2Pulse(); pendingAnim = 4; }
+  else if (cmd.startsWith("VOL:")) {
+    int vol = cmd.substring(4).toInt();      // 0..100
+    g_bleVolume = vol;
+    Serial.printf("[CTRL] volume -> %d%%\n", vol);
+  } else {
+    Serial.printf("[CTRL] unknown command '%s'\n", cmd.c_str());
+  }
+}
+
+// Pull every complete "$...#" frame out of the running buffer.
+void parseFrames() {
+  int start = g_rxBuffer.indexOf('$');
+  while (start >= 0) {
+    int end = g_rxBuffer.indexOf('#', start + 1);
+    if (end < 0) break;                       // partial frame — wait for more
+    handleCommand(g_rxBuffer.substring(start + 1, end));
+    g_rxBuffer = g_rxBuffer.substring(end + 1);
+    start = g_rxBuffer.indexOf('$');
+  }
+  // Drop any garbage before the first '$' so the buffer can't grow unbounded.
+  if (start < 0 && g_rxBuffer.length() > 64) g_rxBuffer = "";
+}
+
+class CtrlCharCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) override {
+    String v = c->getValue().c_str();
+    Serial.printf("[CTRL] BLE write received (%d bytes): %s\n", v.length(), v.c_str());
+    g_rxBuffer += v;
+    parseFrames();
+  }
+};
+
+// Logs when the watch connects / drops the BLE control link, so you can tell
+// from the Serial Monitor whether the channel is even up.
+class CtrlServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer* s) override {
+    Serial.println("[CTRL] >>> watch BLE control link CONNECTED");
+  }
+  void onDisconnect(BLEServer* s) override {
+    Serial.println("[CTRL] <<< watch BLE control link DISCONNECTED — re-advertising");
+    BLEDevice::startAdvertising();
+  }
+};
+
+void startBLEControl() {
+  Serial.println("[CTRL] startBLEControl() begin");
+  BLEDevice::init(DEVICE_NAME);
+  Serial.println("[CTRL] BLEDevice::init done");
+
+  BLEServer* server = BLEDevice::createServer();
+  server->setCallbacks(new CtrlServerCallbacks());
+
+  BLEService* service = server->createService(CTRL_SERVICE_UUID);
+  BLECharacteristic* ch = service->createCharacteristic(
+      CTRL_CHAR_UUID,
+      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  ch->setCallbacks(new CtrlCharCallbacks());
+  service->start();
+
+  // A 128-bit UUID (16 B) + the device name won't both fit in the 31-byte
+  // advertising packet — that overflow silently drops the service UUID, so a
+  // filtered scan on the watch never finds us. Put the UUID in the ADV packet
+  // and the name in the SCAN-RESPONSE packet instead.
+  BLEAdvertising* adv = BLEDevice::getAdvertising();
+  BLEAdvertisementData advData;
+  advData.setFlags(0x06);                                // general discoverable, BR/EDR not supported (BLE)
+  advData.setCompleteServices(BLEUUID(CTRL_SERVICE_UUID));
+  adv->setAdvertisementData(advData);
+
+  BLEAdvertisementData scanResp;
+  scanResp.setName(DEVICE_NAME);
+  adv->setScanResponseData(scanResp);
+
+  BLEDevice::startAdvertising();
+  Serial.println("[CTRL] BLE control service advertising (UUID in adv, name in scan-resp).");
+}
+
+// --- State we track for the periodic status line ---
+volatile uint32_t g_dataPackets = 0;    // incremented every time audio data arrives
+volatile uint32_t g_dataBytes   = 0;
+int g_connState = -1;                    // last connection state
+int g_audioState = -1;                   // last audio state
+unsigned long g_lastStatus = 0;
+
+// ============================================================
+//  A2DP callbacks
+// ============================================================
+void connection_state_changed(esp_a2d_connection_state_t state, void* /*ptr*/) {
+  g_connState = (int)state;
+  Serial.print("[BT] Connection state -> ");
+  switch (state) {
+    case ESP_A2D_CONNECTION_STATE_DISCONNECTED:
+      Serial.println("DISCONNECTED"); break;
+    case ESP_A2D_CONNECTION_STATE_CONNECTING:
+      Serial.println("CONNECTING..."); break;
+    case ESP_A2D_CONNECTION_STATE_CONNECTED:
+      Serial.println("CONNECTED  <<< watch is paired!"); break;
+    case ESP_A2D_CONNECTION_STATE_DISCONNECTING:
+      Serial.println("DISCONNECTING..."); break;
+    default:
+      Serial.printf("UNKNOWN (%d)\n", (int)state); break;
+  }
+}
+
+void audio_state_changed(esp_a2d_audio_state_t state, void* /*ptr*/) {
+  g_audioState = (int)state;
+  Serial.print("[BT] Audio state -> ");
+  if (state == ESP_A2D_AUDIO_STATE_STARTED) {
+    Serial.println("STARTED (playing)  <<< audio should be coming out now");
+  } else {
+    Serial.printf("STOPPED/SUSPENDED (%d)\n", (int)state);
+  }
+}
+
+void data_received() {
+  g_dataPackets++;
+}
+
+void avrc_metadata(uint8_t id, const uint8_t* text) {
+  Serial.printf("[BT] Metadata id=0x%02x : %s\n", id, text);
+}
+
+void avrc_volume(int vol) {
+  Serial.printf("[BT] AVRCP volume -> %d (0-127)\n", vol);
+}
+
+void printStatusHeartbeat(unsigned long now) {
+  if (now - g_lastStatus < 2000) return;
+  g_lastStatus = now;
+
+  uint32_t packets = g_dataPackets;
+  g_dataPackets = 0;
+
+  const char* conn =
+    (g_connState == ESP_A2D_CONNECTION_STATE_CONNECTED)     ? "CONNECTED" :
+    (g_connState == ESP_A2D_CONNECTION_STATE_CONNECTING)    ? "CONNECTING" :
+    (g_connState == ESP_A2D_CONNECTION_STATE_DISCONNECTING) ? "DISCONNECTING" :
+    "DISCONNECTED";
+  const char* audio =
+    (g_audioState == ESP_A2D_AUDIO_STATE_STARTED) ? "PLAYING" : "not playing";
+
+  Serial.printf("[STATUS] conn=%s | audio=%s | data packets last 2s = %lu %s\n",
+                conn, audio, (unsigned long)packets,
+                packets > 0 ? "(audio is flowing!)" : "(no audio bytes)");
+}
+
+// ============================================================
+//  Servos — servo1 tracks the BLE "$VOL:xx#" volume (0-100 -> 0-180deg).
+//  servo2 pulses 0 -> 45 -> 0 (a "nod") each time NEXT/PREV/PLAY/PAUSE
+//  is received.
+// ============================================================
+static const int SERVO_PIN_1 = 18;
+static const int SERVO_PIN_2 = 13;
+
+Servo servo1;
+Servo servo2;
+
+int lastVolumeAngle = -1;   // last angle written to servo1, so we only write on change
+
+const int SERVO2_REST_ANGLE  = 0;
+const int SERVO2_PULSE_ANGLE = 45;
+const unsigned long SERVO2_PULSE_HOLD_MS = 200;  // how long servo2 stays at 45 before returning to 0
+bool servo2Pulsing = false;
+unsigned long servo2PulseStart = 0;
+
+// Call this from handleCommand() on NEXT/PREV/PLAY/PAUSE to fire a servo2 nod.
+void triggerServo2Pulse() {
+  servo2Pulsing = true;
+  servo2PulseStart = millis();
+  servo2.write(SERVO2_PULSE_ANGLE);
+}
+
+void updateServos(unsigned long now) {
+  // servo1: follow last "$VOL:xx#" BLE volume, 100% -> 180deg
+  int volumeAngle = map(g_bleVolume, 0, 100, 0, 180);
+  volumeAngle = constrain(volumeAngle, 0, 180);
+  if (volumeAngle != lastVolumeAngle) {
+    lastVolumeAngle = volumeAngle;
+    servo1.write(volumeAngle);
+  }
+
+  // servo2: return to rest once the pulse hold time has elapsed
+  if (servo2Pulsing && (now - servo2PulseStart >= SERVO2_PULSE_HOLD_MS)) {
+    servo2Pulsing = false;
+    servo2.write(SERVO2_REST_ANGLE);
+  }
+}
+
+// ============================================================
+//  OLED face — bitmap-frame animations (forward/backward/play/pause + idle
+//  eyes / playing loop), ported from Downloads/inker.ino. Driven by isPlaying
+//  and pendingAnim (set from BLE NEXT/PREV/PLAY/PAUSE).
+// ============================================================
+#define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
+
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // ============================================================
@@ -2024,18 +2296,12 @@ unsigned long moveTime = 0;
 // Animation timing
 int forwardFrameDelay = 70;            // ms per animation frame
 
-// Playback state: true = song playing, false = paused / idle (no song)
-bool isPlaying = false;                // boot idle until the watch sends PLAY
 
 // Playing (song-running) ambient animation
 int playingFrameIndex = 0;
 unsigned long lastPlayingFrameTime = 0;
 int playingFrameInterval = 120;        // ms between playing-animation frames
 
-// Animation requested by a BLE command. Set in the BLE callback (fast), then
-// rendered in loop() so we never block the BLE stack while audio is streaming.
-// 0=none, 1=forward(NEXT), 2=backward(PREV), 3=play(PLAY), 4=pause(PAUSE)
-volatile int pendingAnim = 0;
 
 // --- Animation players (blocking; only ever called from loop(), not callbacks) ---
 void playForward() {
@@ -2129,145 +2395,6 @@ void renderAmbient() {
   delay(30);
 }
 
-// A2DP connection / audio state. Declared here (before handleCommand) so the
-// BLE command handler can check whether the audio link is actually connected.
-volatile uint32_t g_dataPackets = 0;
-volatile uint32_t g_dataBytes   = 0;
-int g_connState = -1;
-int g_audioState = -1;
-unsigned long g_lastStatus = 0;
-
-// ============================================================
-//  BLE control channel (watch -> ESP32 command frames)
-// ------------------------------------------------------------
-//  UUIDs MUST match ESP32Link.swift on the watch.
-// ============================================================
-#define CTRL_SERVICE_UUID "0000A100-0000-1000-8000-00805F9B34FB"
-#define CTRL_CHAR_UUID    "0000A101-0000-1000-8000-00805F9B34FB"
-
-String g_rxBuffer;   // accumulates bytes until a full "$...#" frame arrives
-
-// Act on one parsed command (payload WITHOUT the $ and #). Runs inside the BLE
-// write callback, so keep it FAST: just flag which face animation to play and
-// let loop() render it. Never call the blocking play*() helpers from here.
-void handleCommand(const String& cmd) {
-  Serial.printf("[CTRL] command: '%s'\n", cmd.c_str());
-
-  // Only respond when the watch's Bluetooth audio (A2DP) is actually connected.
-  // The BLE control link can be up before/without audio pairing, but we ignore
-  // its commands until the speaker is truly connected to this watch.
-  if (g_connState != ESP_A2D_CONNECTION_STATE_CONNECTED) {
-    Serial.printf("[CTRL] ignored '%s' (Bluetooth audio not connected)\n", cmd.c_str());
-    return;
-  }
-
-  if      (cmd == "NEXT")  pendingAnim = 1;   // forward animation
-  else if (cmd == "PREV")  pendingAnim = 2;   // backward animation
-  else if (cmd == "PLAY")  pendingAnim = 3;   // play animation -> playing face
-  else if (cmd == "PAUSE") pendingAnim = 4;   // pause animation -> idle face
-  else if (cmd.startsWith("VOL:")) {
-    // Volume is handled by the A2DP audio path; no face change for it.
-  } else {
-    Serial.printf("[CTRL] unknown command '%s'\n", cmd.c_str());
-  }
-}
-
-// Pull every complete "$...#" frame out of the running buffer.
-void parseFrames() {
-  int start = g_rxBuffer.indexOf('$');
-  while (start >= 0) {
-    int end = g_rxBuffer.indexOf('#', start + 1);
-    if (end < 0) break;                       // partial frame — wait for more
-    handleCommand(g_rxBuffer.substring(start + 1, end));
-    g_rxBuffer = g_rxBuffer.substring(end + 1);
-    start = g_rxBuffer.indexOf('$');
-  }
-  if (start < 0 && g_rxBuffer.length() > 64) g_rxBuffer = "";
-}
-
-class CtrlCharCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* c) override {
-    String v = c->getValue();
-    Serial.printf("[CTRL] BLE write received (%d bytes): %s\n", v.length(), v.c_str());
-    g_rxBuffer += v;
-    parseFrames();
-  }
-};
-
-class CtrlServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* s) override {
-    Serial.println("[CTRL] >>> watch BLE control link CONNECTED");
-  }
-  void onDisconnect(BLEServer* s) override {
-    Serial.println("[CTRL] <<< watch BLE control link DISCONNECTED — re-advertising");
-    BLEDevice::startAdvertising();
-  }
-};
-
-void startBLEControl() {
-  Serial.println("[CTRL] startBLEControl() begin");
-  BLEDevice::init("Inker");
-  BLEServer* server = BLEDevice::createServer();
-  server->setCallbacks(new CtrlServerCallbacks());
-  BLEService* service = server->createService(CTRL_SERVICE_UUID);
-  BLECharacteristic* ch = service->createCharacteristic(
-      CTRL_CHAR_UUID,
-      BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
-  ch->setCallbacks(new CtrlCharCallbacks());
-  service->start();
-
-  // Put the 128-bit service UUID in the ADV packet and the name in the
-  // SCAN-RESPONSE packet so both fit in the 31-byte advertising limit.
-  BLEAdvertising* adv = BLEDevice::getAdvertising();
-
-  BLEAdvertisementData advData;
-  advData.setFlags(0x06);
-  advData.setCompleteServices(BLEUUID(CTRL_SERVICE_UUID));
-  adv->setAdvertisementData(advData);
-
-  BLEAdvertisementData scanResp;
-  scanResp.setName("Inker");
-  adv->setScanResponseData(scanResp);
-
-  BLEDevice::startAdvertising();
-  Serial.println("[CTRL] BLE control service advertising.");
-}
-
-// ============================================================
-//  A2DP callbacks
-// ============================================================
-void connection_state_changed(esp_a2d_connection_state_t state, void* /*ptr*/) {
-  g_connState = (int)state;
-  Serial.print("[BT] Connection state -> ");
-  switch (state) {
-    case ESP_A2D_CONNECTION_STATE_DISCONNECTED:  Serial.println("DISCONNECTED"); break;
-    case ESP_A2D_CONNECTION_STATE_CONNECTING:    Serial.println("CONNECTING..."); break;
-    case ESP_A2D_CONNECTION_STATE_CONNECTED:     Serial.println("CONNECTED  <<< watch is paired!"); break;
-    case ESP_A2D_CONNECTION_STATE_DISCONNECTING: Serial.println("DISCONNECTING..."); break;
-    default:                                     Serial.printf("UNKNOWN (%d)\n", (int)state); break;
-  }
-}
-
-void audio_state_changed(esp_a2d_audio_state_t state, void* /*ptr*/) {
-  g_audioState = (int)state;
-  Serial.print("[BT] Audio state -> ");
-  if (state == ESP_A2D_AUDIO_STATE_STARTED) {
-    Serial.println("STARTED (playing)");
-  } else {
-    Serial.printf("STOPPED/SUSPENDED (%d)\n", (int)state);
-  }
-}
-
-void data_received() { g_dataPackets++; }
-
-void avrc_metadata(uint8_t id, const uint8_t* text) {
-  Serial.printf("[BT] Metadata id=0x%02x : %s\n", id, text);
-}
-
-void avrc_volume(int vol) {
-  Serial.printf("[BT] AVRCP volume -> %d (0-127)\n", vol);
-}
-
 // ============================================================
 //  Setup
 // ============================================================
@@ -2276,71 +2403,68 @@ void setup() {
   delay(300);
   Serial.println();
   Serial.println("========================================");
-  Serial.println(" Inker — A2DP sink + OLED face booting");
+  Serial.printf(" %s — A2DP + BLE + servos + animated OLED face booting\n", DEVICE_NAME);
   Serial.println("========================================");
 
-  // ---- OLED ----
-  Wire.begin();  // default SDA=21, SCL=22
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("[OLED] SSD1306 init FAILED (check wiring / 0x3C vs 0x3D).");
-  } else {
-    Serial.println("[OLED] SSD1306 init OK.");
-  }
-  display.clearDisplay();
-  display.display();
+  // Route A2DP audio to the built-in DAC (GPIO25 / GPIO26). The library
+  // detects the I2S_MODE_DAC_BUILT_IN flag and configures the internal DAC
+  // itself — no external DAC/amp wiring beyond GPIO25/26 needed.
+  static const i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_DAC_BUILT_IN),
+    .sample_rate = 44100,                       // updated automatically from the stream
+    .bits_per_sample = (i2s_bits_per_sample_t)16,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = (i2s_comm_format_t)I2S_COMM_FORMAT_STAND_MSB,
+    .intr_alloc_flags = 0,
+    .dma_buf_count = 8,
+    .dma_buf_len = 64,
+    .use_apll = false,
+    .tx_desc_auto_clear = true,
+    .fixed_mclk = 0
+  };
+  a2dp_sink.set_i2s_config(i2s_config);
+  Serial.println("[I2S] Internal DAC configured (GPIO25/26).");
 
-  // ---- Audio (I2S) ----
-  Serial.printf("[I2S] Pins BCLK=%d WS=%d DOUT=%d\n", I2S_BCLK, I2S_WS, I2S_DOUT);
-  i2s.setPins(I2S_BCLK, I2S_WS, I2S_DOUT);
-  if (!i2s.begin(I2S_MODE_STD, 44100, I2S_DATA_BIT_WIDTH_16BIT,
-                 I2S_SLOT_MODE_STEREO, I2S_STD_SLOT_BOTH)) {
-    Serial.println("[I2S] FAILED to initialize I2S! Check wiring/pins. Halting.");
-    while (1) { delay(1000); }
-  }
-  Serial.println("[I2S] Initialized OK.");
-
-  // Register A2DP callbacks BEFORE start().
   a2dp_sink.set_on_connection_state_changed(connection_state_changed);
   a2dp_sink.set_on_audio_state_changed(audio_state_changed);
   a2dp_sink.set_on_data_received(data_received);
   a2dp_sink.set_avrc_metadata_callback(avrc_metadata);
   a2dp_sink.set_on_volumechange(avrc_volume);
+  a2dp_sink.set_volume_control(&g_volumeControl);
+  Serial.printf("[AUDIO] Software gain x%.1f on top of watch AVRCP volume.\n", AUDIO_GAIN);
 
-  // BLE up first (dual mode BR/EDR + BLE), then A2DP on top.
+  // Bring up BLE first so the controller comes up in dual mode (BR/EDR + BLE),
+  // then start A2DP on top.
   startBLEControl();
-  a2dp_sink.start("Inker");
+  a2dp_sink.start(DEVICE_NAME);
+  Serial.println("[BT] A2DP sink started.");
 
-  Serial.println("[BT] A2DP sink started. Pair 'Inker' on the watch (Settings > Bluetooth).");
+  // Servos
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  servo1.attach(SERVO_PIN_1);
+  servo2.attach(SERVO_PIN_2);
+  Serial.printf("[SERVO] Attached servo1=GPIO%d servo2=GPIO%d\n", SERVO_PIN_1, SERVO_PIN_2);
+
+  // OLED (uses default I2C pins SDA=21 / SCL=22)
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  display.clearDisplay();
+  display.display();
+  Serial.println("[OLED] Initialized.");
+
   Serial.println("----------------------------------------");
 }
 
+
 // ============================================================
-//  Loop — render the face; run any BLE-requested animation; heartbeat log
+//  Loop — servos are non-blocking; the requested face animation (if any)
+//  blocks briefly to play its frames, otherwise we render the ambient face.
 // ============================================================
 void loop() {
   unsigned long now = millis();
+  updateServos(now);
+  printStatusHeartbeat(now);
 
-  // Heartbeat status line every 2 seconds
-  if (now - g_lastStatus >= 2000) {
-    g_lastStatus = now;
-    uint32_t packets = g_dataPackets;
-    g_dataPackets = 0;
-
-    const char* conn =
-      (g_connState == ESP_A2D_CONNECTION_STATE_CONNECTED)     ? "CONNECTED" :
-      (g_connState == ESP_A2D_CONNECTION_STATE_CONNECTING)    ? "CONNECTING" :
-      (g_connState == ESP_A2D_CONNECTION_STATE_DISCONNECTING) ? "DISCONNECTING" :
-      "DISCONNECTED";
-    const char* audio =
-      (g_audioState == ESP_A2D_AUDIO_STATE_STARTED) ? "PLAYING" : "not playing";
-
-    Serial.printf("[STATUS] conn=%s | audio=%s | data packets last 2s = %lu %s\n",
-                  conn, audio, (unsigned long)packets,
-                  packets > 0 ? "(audio is flowing!)" : "(no audio bytes)");
-  }
-
-  // Run any animation requested by the last BLE command (blocking here is fine;
-  // audio runs on its own A2DP task, and the BLE callback stays non-blocking).
   if (pendingAnim != 0) {
     int a = pendingAnim;
     pendingAnim = 0;
@@ -2356,6 +2480,5 @@ void loop() {
     return;
   }
 
-  // Otherwise draw the ambient face (idle eyes or playing animation).
   renderAmbient();
 }
