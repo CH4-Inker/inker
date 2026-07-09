@@ -134,6 +134,18 @@ We struggled with power distribution configurations, trying to run the ESP32, se
     ![Side-by-side comparison of head unit with active OLED](docs/side%20by%20side%20comparison%20of%20the%20head%20with%20the%20oled%20display.jpeg)
     *Figure 13: Side-by-side comparison of the physical head assembly with the active OLED display.*
 
+*   **OLED Face Animations**: Each media action is mirrored on the OLED face with a matching pixel-art animation (designed in Aseprite, running live on the physical hardware), giving the device an expressive, eyes-catching character on top of the eyes-free haptic controls:
+
+| ▶️ Play | ⏸️ Pause | 🎵 Music Playing |
+| :---: | :---: | :---: |
+| ![Play animation](docs/animation/play.gif) | ![Pause animation](docs/animation/pause.gif) | ![Music playing animation](docs/animation/music_playing.gif) |
+| *Figure 14: Face animation triggered on Play.* | *Figure 15: Face animation triggered on Pause.* | *Figure 16: Idle/looping animation while music is actively playing.* |
+
+| ⏮️ Previous Track | ⏭️ Next Track |
+| :---: | :---: |
+| ![Backward/previous track animation](docs/animation/backward.gif) | ![Forward/next track animation](docs/animation/forward.gif) |
+| *Figure 17: Face animation triggered on the Previous track control.* | *Figure 18: Face animation triggered on the Next track control.* |
+
 ---
 
 ### ⌚ Hybrid Gestures & Physical Controls
