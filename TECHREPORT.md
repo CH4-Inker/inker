@@ -1,5 +1,9 @@
 # 📝 Tech Report — InKer
 
+<p align="center">
+  <img src="docs/inker_logo.jpg" alt="InKer Logo" width="180" />
+</p>
+
 [◉°] ━━━━━━━⚙️━━━━━━━━━ Team Blackout ━━━━━━━━━⚙️━━━━━━ [°◉]
 
 ## 👥 1. Present your team
